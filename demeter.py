@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+import argparse
+import logging
+import os
+import sys
+import sqlite3
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
+
+# --- Build Info ---
+VERSION = "1.0.0"
+COMMIT = ""
+DATE = ""
+BUILT_BY = ""
+
+# --- Database Paths ---
+SITES_DB_PATH = os.path.expanduser("~/Documents/Github/Calishot-2.0/data/sites.db")
+INDEX_DB_PATH = os.path.expanduser("~/Documents/Github/Calishot-2.0/data/index.db")
+
+# --- Logging Setup ---
+def setup_logging(verbose: bool):
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s %(levelname)s %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+# --- Database Connections ---
+def get_sites_db_conn():
+    return sqlite3.connect(SITES_DB_PATH, timeout=30, check_same_thread=False)
+
+def get_index_db_conn():
+    conn = sqlite3.connect(INDEX_DB_PATH, timeout=30, check_same_thread=False)
+    try:
+        conn.execute('PRAGMA journal_mode=WAL;')
+    except Exception:
+        pass
+    return conn
+
+# --- CLI Handlers ---
+def handle_version(args):
+    print(f"Demeter {VERSION}")
+    print(f"Build date: {DATE}")
+    print(f"Commit hash: {COMMIT}")
+    print(f"Built by: {BUILT_BY}")
+
+def handle_dl_list(args):
+    conn = get_index_db_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT COUNT(*) FROM summary")
+        total = cur.fetchone()[0]
+        print(f"Total downloads: {total}")
+    except Exception as e:
+        print(f"Error listing downloads: {e}")
+    finally:
+        conn.close()
+
+def handle_dl_add(args):
+    conn = get_index_db_conn()
+    cur = conn.cursor()
+    now = datetime.now().isoformat()
+    for hash_ in args.bookhash:
+        try:
+            # Add missing fields as needed for 'summary' table
+            cur.execute("INSERT INTO summary (uuid, title, authors, formats) VALUES (?, ?, ?, ?)", (hash_, 'Unknown Title', 'Unknown Author', 'epub'))
+            print(f"Book {hash_} has been added to the database")
+        except Exception as e:
+            print(f"Could not save {hash_}: {e}")
+    conn.commit()
+    conn.close()
+
+def handle_dl_deleterecent(args):
+    conn = get_index_db_conn()
+    cur = conn.cursor()
+    try:
+        cutoff = datetime.now() - timedelta(hours=float(args.hours))
+        cur.execute("SELECT uuid, year FROM summary")
+        deleted = 0
+        scanned = 0
+        for row in cur.fetchall():
+            scanned += 1
+            book_uuid, year = row
+            # year field may not be a timestamp; this is a placeholder logic
+            # If you have a timestamp field, use it instead
+            # Example: added_time = datetime.fromisoformat(added)
+            # if added_time > cutoff:
+            #     deleted += 1
+        print(f"Would have scanned {scanned} books (deletion not implemented, see code comment)")
+    except Exception as e:
+        print(f"Error deleting recent downloads: {e}")
+    finally:
+        conn.close()
+
+def main():
+    parser = argparse.ArgumentParser(description="demeter is CLI application for scraping calibre hosts and retrieving books in epub format that are not in your local library.")
+    parser.add_argument('-v', '--verbose', action='store_true', help='enable verbose output')
+    subparsers = parser.add_subparsers(dest='command')
+
+    # version
+    parser_version = subparsers.add_parser('version', help='Shows version information')
+    parser_version.set_defaults(func=handle_version)
+
+    # dl group
+    parser_dl = subparsers.add_parser('dl', help='download related commands')
+    dl_subparsers = parser_dl.add_subparsers(dest='dl_command')
+
+    parser_dl_list = dl_subparsers.add_parser('list', help='list all downloads')
+    parser_dl_list.set_defaults(func=handle_dl_list)
+
+    parser_dl_add = dl_subparsers.add_parser('add', help='add a number of hashes to the database')
+    parser_dl_add.add_argument('bookhash', nargs='+', help='book hashes to add')
+    parser_dl_add.set_defaults(func=handle_dl_add)
+
+    parser_dl_delrecent = dl_subparsers.add_parser('deleterecent', help='delete all downloads from this time period')
+    parser_dl_delrecent.add_argument('hours', help='hours to look back, e.g. 24 for 24h')
+    parser_dl_delrecent.set_defaults(func=handle_dl_deleterecent)
+
+    # host group
+    parser_host = subparsers.add_parser('host', help='all host related commands')
+    host_subparsers = parser_host.add_subparsers(dest='host_command')
+
+    parser_host_list = host_subparsers.add_parser('list', help='list all hosts')
+    parser_host_list.set_defaults(func=handle_host_list)
+
+    parser_host_add = host_subparsers.add_parser('add', help='add one or more hosts to the scrape list')
+    parser_host_add.add_argument('hosturl', nargs='+', help='host urls to add')
+    parser_host_add.set_defaults(func=handle_host_add)
+
+    parser_host_del = host_subparsers.add_parser('rm', help='delete a host')
+    parser_host_del.add_argument('hostid', help='host id to remove')
+    parser_host_del.set_defaults(func=handle_host_rm)
+
+    parser_host_enable = host_subparsers.add_parser('enable', help='make a host active')
+    parser_host_enable.add_argument('hostid', help='host id to enable')
+    parser_host_enable.set_defaults(func=handle_host_enable)
+
+    parser_host_disable = host_subparsers.add_parser('disable', help='disable a host')
+    parser_host_disable.add_argument('hostid', help='host id to disable')
+    parser_host_disable.set_defaults(func=handle_host_disable)
+
+    parser_host_detail = host_subparsers.add_parser('stats', help='get host stats')
+    parser_host_detail.add_argument('hostid', help='host id for stats')
+    parser_host_detail.set_defaults(func=handle_host_stats)
+
+    # scrape group
+    parser_scrape = subparsers.add_parser('scrape', help='all scrape related commands')
+    scrape_subparsers = parser_scrape.add_subparsers(dest='scrape_command')
+
+    parser_scrape_run = scrape_subparsers.add_parser('run', help='run all scrape jobs')
+    parser_scrape_run.add_argument('-e', '--extension', default='epub', help='extension of files to download (default: epub)')
+    parser_scrape_run.add_argument('-d', '--outputdir', default='books', help='path to downloaded books (default: books)')
+    parser_scrape_run.set_defaults(func=handle_scrape_run)
+
+    parser_scrape_results = scrape_subparsers.add_parser('results', help='show scrape results')
+    parser_scrape_results.set_defaults(func=handle_scrape_results)
+
+    args = parser.parse_args()
+    setup_logging(args.verbose)
+
+    if hasattr(args, 'func'):
+        args.func(args)
+    else:
+        parser.print_help()
+
+# --- Host Handlers ---
+def handle_host_list(args):
+    conn = get_sites_db_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT demeter_id, uuid, url, status, downloads, scrapes FROM sites WHERE status = 'online' ORDER BY demeter_id ASC")
+        rows = cur.fetchall()
+        if not rows:
+            print("No hosts were found.")
+        else:
+            for row in rows:
+                print(f"demeter_id: {row[0]}, UUID: {row[1]}, URL: {row[2]}, Status: {row[3]}, Downloads: {row[4]}, Scrapes: {row[5]}")
+    except Exception as e:
+        print(f"Error listing hosts: {e}")
+    finally:
+        conn.close()
+
+def handle_host_add(args):
+    conn = get_sites_db_conn()
+    cur = conn.cursor()
+    # Find current max demeter_id
+    cur.execute("SELECT MAX(demeter_id) FROM sites")
+    row = cur.fetchone()
+    next_id = (row[0] or 0) + 1
+    for hosturl in args.hosturl:
+        try:
+            cur.execute("INSERT INTO sites (uuid, url, status, demeter_id) VALUES (?, ?, ?, ?)", (hosturl, hosturl, 'active', next_id))
+            print(f"Host {hosturl} has been added to the database with demeter_id {next_id}")
+            next_id += 1
+        except Exception as e:
+            print(f"Could not save {hosturl}: {e}")
+    conn.commit()
+    conn.close()
+
+def handle_host_rm(args):
+    conn = get_sites_db_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM sites WHERE demeter_id=?", (args.hostid,))
+        print(f"Host with demeter_id {args.hostid} has been removed from the database")
+    except Exception as e:
+        print(f"Error removing host: {e}")
+    finally:
+        conn.commit()
+        conn.close()
+
+def handle_host_enable(args):
+    conn = get_sites_db_conn()
+    cur = conn.cursor()
+    try:
+        # Check if demeter_id exists and get current status
+        cur.execute("SELECT uuid, url, status, active FROM sites WHERE demeter_id=?", (args.hostid,))
+        row = cur.fetchone()
+        if not row:
+            print(f"No host found with demeter_id {args.hostid}.")
+            return
+        uuid, url, current_status, current_active = row
+        
+        # Check if already enabled
+        if current_active == 1:
+            print(f"Host with demeter_id {args.hostid} (uuid={uuid}, url={url}) is already enabled (status='{current_status}', active={current_active})")
+            return
+            
+        # Enable the host
+        cur.execute("UPDATE sites SET status='active', active=1 WHERE demeter_id=?", (args.hostid,))
+        print(f"Host with demeter_id {args.hostid} (uuid={uuid}, url={url}) has been enabled (status='active', active=1)")
+    except Exception as e:
+        print(f"Error enabling host: {e}")
+    finally:
+        conn.commit()
+        conn.close()
+
+def handle_host_disable(args):
+    conn = get_sites_db_conn()
+    cur = conn.cursor()
+    try:
+        # Check if demeter_id exists
+        cur.execute("SELECT uuid, url FROM sites WHERE demeter_id=?", (args.hostid,))
+        row = cur.fetchone()
+        if not row:
+            print(f"No host found with demeter_id {args.hostid}.")
+            return
+        cur.execute("UPDATE sites SET status='disabled', active=0 WHERE demeter_id=?", (args.hostid,))
+        print(f"Host with demeter_id {args.hostid} (uuid={row[0]}, url={row[1]}) has been disabled (status='disabled', active=0)")
+    except Exception as e:
+        print(f"Error disabling host: {e}")
+    finally:
+        conn.commit()
+        conn.close()
+
+def handle_host_stats(args):
+    conn = get_sites_db_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT demeter_id, uuid, url, downloads, scrapes, last_scrape, last_download FROM sites WHERE demeter_id=?", (args.hostid,))
+        row = cur.fetchone()
+        if row:
+            print(f"Host Stats for {row[2]}:")
+            print(f"  demeter_id: {row[0]}")
+            print(f"  UUID: {row[1]}")
+            print(f"  Downloads: {row[3]}")
+            print(f"  Scrapes: {row[4]}")
+            print(f"  Last Scrape: {row[5]}")
+            print(f"  Last Download: {row[6]}")
+        else:
+            print("No host found with that demeter_id.")
+    except Exception as e:
+        print(f"Error getting host stats: {e}")
+    finally:
+        conn.close()
+
+# --- Scrape Handlers ---
+def handle_scrape_run(args):
+    """
+    Scrape all online hosts, fetch new book IDs, download missing books, and update stats in the database.
+    """
+    # Configurable parameters
+    step_size = 50
+    workers = 5
+    user_agent = 'demeter / v1'
+    output_dir = getattr(args, 'outputdir', 'books')
+    extension = getattr(args, 'extension', 'epub')
+    timeout = 30
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Connect to DBs
+    sites_conn = get_sites_db_conn()
+    sites_cur = sites_conn.cursor()
+    # index_conn and index_cur are no longer shared; each thread will open its own connection
+
+    # Get all enabled hosts (status 'online' or 'active' and active=1)
+    sites_cur.execute("SELECT demeter_id, url, downloads, scrapes FROM sites WHERE (status = 'online' OR status = 'active') AND active=1")
+    hosts = sites_cur.fetchall()
+    if not hosts:
+        print("No enabled hosts to scrape.")
+        return
+
+    import urllib.parse
+    def get_book_ids(host_url, extension):
+        import urllib.parse
+        host = urllib.parse.urlparse(host_url).hostname
+        conn = get_index_db_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT uuid, links FROM summary WHERE links LIKE ? AND links LIKE ?", (f"%{host}%", f"%{extension}%"))
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+        print(f"[DEBUG] Host: {host_url}")
+        print(f"[DEBUG] Querying index.db for links LIKE '%{host}%' AND links LIKE '%{extension}%'...")
+        print(f"[DEBUG] Found book UUIDs and links: {rows}")
+        import json
+        book_links = []
+        for uuid, links_json in rows:
+            try:
+                links = json.loads(links_json)
+                for link in links:
+                    if host in link.get('href','') and extension in link.get('label',''):
+                        label = link.get('label')
+                        book_links.append((uuid, link['href'], label))
+                        break
+            except Exception as e:
+                print(f"[DEBUG] Could not parse links for {uuid}: {e}")
+        print(f"[DEBUG] Download targets (uuid, href, label): {book_links}")
+        return book_links
+
+    def download_book(host_url, book_tuple):
+        uuid, href, label = book_tuple
+        try:
+            # Each thread opens its own index.db connection
+            thread_index_conn = get_index_db_conn()
+            try:
+                thread_index_cur = thread_index_conn.cursor()
+                
+                # Get the actual book title from the summary table
+                thread_index_cur.execute("SELECT title FROM summary WHERE uuid = ?", (uuid,))
+                result = thread_index_cur.fetchone()
+                book_title = result[0] if result and result[0] else uuid
+                
+                # Always download and overwrite the file, even if uuid is present in index.db
+                # Download book file using the actual href
+                print(f"[DEBUG] Downloading book {uuid} from href: {href}")
+                rf = requests.get(href, headers={"User-Agent": user_agent}, timeout=timeout)
+                if rf.status_code == 200:
+                    # Extract extension from href or default to .epub
+                    import os
+                    from urllib.parse import urlparse
+                    path = urlparse(href).path
+                    ext = os.path.splitext(path)[-1]
+                    if ext and len(ext) < 8:
+                        file_ext = ext.lstrip('.')
+                    else:
+                        file_ext = extension
+                    
+                    # Use the actual book title for filename
+                    import re
+                    safe_title = re.sub(r'[^A-Za-z0-9\-_\. ]+', '_', book_title).strip().replace(' ', '_')
+                    if not safe_title:
+                        safe_title = uuid
+                    
+                    file_path = os.path.join(output_dir, f"{safe_title}.{file_ext}")
+                    print(f"[DEBUG] Saving to {file_path}")
+                    with open(file_path, 'wb') as f:
+                        f.write(rf.content)
+                    
+                    # Update the summary with the proper title if it wasn't already set
+                    thread_index_cur.execute("INSERT OR REPLACE INTO summary (uuid, title, authors, formats) VALUES (?, ?, ?, ?)",
+                                     (uuid, book_title, '', file_ext))
+                    thread_index_conn.commit()
+                    return (uuid, 'downloaded')
+                else:
+                    return (uuid, f"download_failed_{rf.status_code}")
+            finally:
+                thread_index_conn.close()
+        except Exception as e:
+            try:
+                thread_index_conn.close()
+            except:
+                pass
+            return (uuid, f"error_{e}")
+
+    for demeter_id, host_url, downloads, scrapes in hosts:
+        print(f"Scraping host {host_url} (demeter_id={demeter_id}) ...")
+        book_ids = get_book_ids(host_url, extension)
+        if not book_ids:
+            print(f"  No books found or failed to fetch book list.")
+            continue
+        new_downloads = 0
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(download_book, host_url, book_tuple): book_tuple for book_tuple in book_ids}
+            for future in as_completed(futures):
+                book_tuple = futures[future]
+                uuid = book_tuple[0]
+                try:
+                    uuid, status = future.result()
+                    if status == 'downloaded':
+                        new_downloads += 1
+                        print(f"  Downloaded book {uuid}")
+                    elif status == 'already_downloaded':
+                        pass
+                    elif status == 'not_found':
+                        print(f"  Book {uuid} not found on remote host.")
+                    else:
+                        print(f"  Book {uuid} error: {status}")
+                except Exception as e:
+                    print(f"  Error downloading book {uuid}: {e}")
+        # Update stats in sites.db
+        now = datetime.now().isoformat()
+        sites_cur.execute("UPDATE sites SET downloads = downloads + ?, scrapes = scrapes + 1, last_scrape = ? WHERE demeter_id = ?",
+                          (new_downloads, now, demeter_id))
+        if new_downloads > 0:
+            sites_cur.execute("UPDATE sites SET last_download = ? WHERE demeter_id = ?", (now, demeter_id))
+        sites_conn.commit()
+        print(f"Host {host_url}: {new_downloads} new books downloaded.")
+
+    sites_conn.close()
+    print("Scrape run complete.")
+
+def handle_scrape_results(args):
+    print("scrape results called")
+
+if __name__ == '__main__':
+    main()
