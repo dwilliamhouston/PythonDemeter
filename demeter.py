@@ -15,8 +15,8 @@ DATE = ""
 BUILT_BY = ""
 
 # --- Database Paths ---
-SITES_DB_PATH = os.path.expanduser("~/Documents/Github/Calishot-2.0/data/sites.db")
-INDEX_DB_PATH = os.path.expanduser("~/Documents/Github/Calishot-2.0/data/index.db")
+SITES_DB_PATH = os.path.expanduser("data/sites.db")
+INDEX_DB_PATH = os.path.expanduser("data/index.db")
 
 # --- Logging Setup ---
 def setup_logging(verbose: bool):
@@ -310,12 +310,13 @@ def handle_scrape_run(args):
         conn = get_index_db_conn()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT uuid, links FROM summary WHERE links LIKE ? AND links LIKE ?", (f"%{host}%", f"%{extension}%"))
+            # Only prefilter by host here; do extension filtering in Python for robustness
+            cur.execute("SELECT uuid, links FROM summary WHERE links LIKE ?", (f"%{host}%",))
             rows = cur.fetchall()
         finally:
             conn.close()
         print(f"[DEBUG] Host: {host_url}")
-        print(f"[DEBUG] Querying index.db for links LIKE '%{host}%' AND links LIKE '%{extension}%'...")
+        print(f"[DEBUG] Querying index.db for links LIKE '%{host}%' ...")
         print(f"[DEBUG] Found book UUIDs and links: {rows}")
         import json
         book_links = []
@@ -323,9 +324,13 @@ def handle_scrape_run(args):
             try:
                 links = json.loads(links_json)
                 for link in links:
-                    if host in link.get('href','') and extension in link.get('label',''):
-                        label = link.get('label')
-                        book_links.append((uuid, link['href'], label))
+                    label = (link.get('label') or '')
+                    href = (link.get('href') or '')
+                    # Case-insensitive match on label or by file extension in href
+                    ext_ok = (extension.lower() in label.lower()) or href.lower().endswith(f".{extension.lower()}")
+                    host_ok = host in href
+                    if host_ok and ext_ok:
+                        book_links.append((uuid, href, label))
                         break
             except Exception as e:
                 print(f"[DEBUG] Could not parse links for {uuid}: {e}")
@@ -340,10 +345,11 @@ def handle_scrape_run(args):
             try:
                 thread_index_cur = thread_index_conn.cursor()
                 
-                # Get the actual book title from the summary table
-                thread_index_cur.execute("SELECT title FROM summary WHERE uuid = ?", (uuid,))
+                # Get the book title and authors from the summary table
+                thread_index_cur.execute("SELECT title, authors FROM summary WHERE uuid = ?", (uuid,))
                 result = thread_index_cur.fetchone()
-                book_title = result[0] if result and result[0] else uuid
+                book_title = (result[0] or uuid) if result else uuid
+                book_authors = (result[1] or '') if result and len(result) > 1 else ''
                 
                 # Always download and overwrite the file, even if uuid is present in index.db
                 # Download book file using the actual href
@@ -360,20 +366,69 @@ def handle_scrape_run(args):
                     else:
                         file_ext = extension
                     
-                    # Use the actual book title for filename
+                    # Build filename strictly as bookname_author.ext
                     import re
-                    safe_title = re.sub(r'[^A-Za-z0-9\-_\. ]+', '_', book_title).strip().replace(' ', '_')
-                    if not safe_title:
-                        safe_title = uuid
+                    # Helper to remove noisy prefixes from any source string
+                    def strip_noise(s: str) -> str:
+                        if not s:
+                            return s
+                        # Remove sequences like: href_http_<host>_<port>_book_id_<id>_library_id_<name>_panel_book_details_(label_)?
+                        s = re.sub(r'^href_.*?panel_book_details_(?:label_)?', '', s, flags=re.IGNORECASE)
+                        # If still contains explicit 'panel_book_details_label_' anywhere, drop everything up to it
+                        if 'panel_book_details_label_' in s:
+                            s = s.split('panel_book_details_label_', 1)[1]
+                        # Remove leading 'label' markers if present
+                        s = re.sub(r'^.*?\blabel[: _-]+', '', s, flags=re.IGNORECASE)
+                        return s
+                    # Prefer parsing from the link label if it contains a clear Title-Author pattern
+                    parsed_title = None
+                    parsed_author = None
+                    if label:
+                        raw_label = str(label).strip()
+                        candidate = strip_noise(raw_label) or raw_label
+                        # Common separators between title and author
+                        for sep in [" - ", " — ", " by "]:
+                            if sep in candidate:
+                                parts = candidate.split(sep, 1)
+                                parsed_title = parts[0].strip()
+                                parsed_author = parts[1].strip()
+                                break
+                    # Fallbacks to DB fields (also clean noise from DB title if it was stored that way)
+                    title_for_name = parsed_title or strip_noise(book_title) or uuid
+                    author_for_name = parsed_author or book_authors or ""
+                    # If multiple authors separated by ';' or ',', prefer first
+                    for sep in [';', ',']:
+                        if author_for_name and sep in author_for_name:
+                            author_for_name = author_for_name.split(sep)[0].strip()
+                            break
+                    # Sanitize
+                    def sanitize_name(s: str) -> str:
+                        s = re.sub(r'[^A-Za-z0-9\-_. ]+', '_', s)
+                        s = s.strip().replace(' ', '_')
+                        s = re.sub(r'_+', '_', s)
+                        return s.strip('_')
+                    safe_title = sanitize_name(title_for_name) if title_for_name else uuid
+                    safe_author = sanitize_name(author_for_name) if author_for_name else ''
+                    filename_core = f"{safe_title}_{safe_author}" if safe_author else safe_title
+                    # Post-clean: if any residual noise remains, strip it aggressively
+                    # Drop anything up to and including 'panel_book_details_(label_)' or 'label_'
+                    try:
+                        filename_core = re.sub(r'.*?(?:panel_book_details_(?:label_)?|\blabel_)(.*)$', r'\1', filename_core, flags=re.IGNORECASE)
+                        # If still begins with 'href_' noise, strip leading href_* until first double underscore-like boundary
+                        filename_core = re.sub(r'^href_.*?_(?=[A-Za-z0-9])', '', filename_core, flags=re.IGNORECASE)
+                    except TypeError:
+                        pass
+                    # Debug: show how we derived the filename (verbose only)
+                    logging.debug(f"[NAME] raw_label={str(label)} candidate={locals().get('candidate', '')} parsed_title={parsed_title} parsed_author={parsed_author} title_for_name={title_for_name} author_for_name={author_for_name} filename_core={filename_core}")
                     
-                    file_path = os.path.join(output_dir, f"{safe_title}.{file_ext}")
+                    file_path = os.path.join(output_dir, f"{filename_core}.{file_ext}")
                     print(f"[DEBUG] Saving to {file_path}")
                     with open(file_path, 'wb') as f:
                         f.write(rf.content)
                     
                     # Update the summary with the proper title if it wasn't already set
                     thread_index_cur.execute("INSERT OR REPLACE INTO summary (uuid, title, authors, formats) VALUES (?, ?, ?, ?)",
-                                     (uuid, book_title, '', file_ext))
+                                     (uuid, book_title, book_authors, file_ext))
                     thread_index_conn.commit()
                     return (uuid, 'downloaded')
                 else:
