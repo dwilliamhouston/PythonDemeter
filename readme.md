@@ -76,7 +76,7 @@ Usage:
 
 Available Commands:
   disable                  Disable a host
-  disable --disable-all    Disable all enabled hosts
+  <b>disable --disable-all    Disable all enabled hosts</b>
   enabled                  Make a host active
   enable --enable-all      Enable all hosts
   enable --enable-country  Enable all hosts from a particular country using country code  
