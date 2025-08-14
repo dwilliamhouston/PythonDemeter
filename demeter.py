@@ -7,6 +7,7 @@ import sqlite3
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+import re
 
 # --- Build Info ---
 VERSION = "1.0.0"
@@ -15,8 +16,9 @@ DATE = ""
 BUILT_BY = ""
 
 # --- Database Paths ---
-SITES_DB_PATH = os.path.expanduser("data/sites.db")
-INDEX_DB_PATH = os.path.expanduser("data/index.db")
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SITES_DB_PATH = os.path.join(_BASE_DIR, "data", "sites.db")
+INDEX_DB_PATH = os.path.join(_BASE_DIR, "data", "index.db")
 
 # --- Logging Setup ---
 def setup_logging(verbose: bool):
@@ -125,6 +127,10 @@ def main():
     parser_host_list = host_subparsers.add_parser('list', help='list all hosts')
     parser_host_list.set_defaults(func=handle_host_list)
 
+    # list-all shows every row without filtering (debugging)
+    parser_host_list_all = host_subparsers.add_parser('list-all', help='list all hosts (no filters)')
+    parser_host_list_all.set_defaults(func=handle_host_list_all)
+
     parser_host_add = host_subparsers.add_parser('add', help='add one or more hosts to the scrape list')
     parser_host_add.add_argument('hosturl', nargs='+', help='host urls to add')
     parser_host_add.set_defaults(func=handle_host_add)
@@ -134,11 +140,15 @@ def main():
     parser_host_del.set_defaults(func=handle_host_rm)
 
     parser_host_enable = host_subparsers.add_parser('enable', help='make a host active')
-    parser_host_enable.add_argument('hostid', help='host id to enable')
+    parser_host_enable.add_argument('--enable-all', action='store_true', help='enable all hosts with status Online')
+    parser_host_enable.add_argument('--enable-country', metavar='CC', help='country abbreviation (e.g., US, DE) to enable all hosts in that country (sets active=1)')
+    parser_host_enable.add_argument('hostid', nargs='?', help='host id to enable (omit when using --enable-all/--enable-country)')
     parser_host_enable.set_defaults(func=handle_host_enable)
 
+
     parser_host_disable = host_subparsers.add_parser('disable', help='disable a host')
-    parser_host_disable.add_argument('hostid', help='host id to disable')
+    parser_host_disable.add_argument('--disable-all', action='store_true', help='disable all hosts where active=1')
+    parser_host_disable.add_argument('hostid', nargs='?', help='host id to disable (omit when using --disable-all)')
     parser_host_disable.set_defaults(func=handle_host_disable)
 
     parser_host_detail = host_subparsers.add_parser('stats', help='get host stats')
@@ -152,6 +162,8 @@ def main():
     parser_scrape_run = scrape_subparsers.add_parser('run', help='run all scrape jobs')
     parser_scrape_run.add_argument('-e', '--extension', default='epub', help='extension of files to download (default: epub)')
     parser_scrape_run.add_argument('-d', '--outputdir', default='books', help='path to downloaded books (default: books)')
+    parser_scrape_run.add_argument('-a', '--authors', default=None, help='SQL LIKE pattern for authors filter (use quotes), e.g. "%King%"')
+    parser_scrape_run.add_argument('-t', '--titles', default=None, help='SQL LIKE pattern for title filter (use quotes), e.g. "%Dune%"')
     parser_scrape_run.set_defaults(func=handle_scrape_run)
 
     parser_scrape_results = scrape_subparsers.add_parser('results', help='show scrape results')
@@ -170,15 +182,44 @@ def handle_host_list(args):
     conn = get_sites_db_conn()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT demeter_id, uuid, url, status, downloads, scrapes FROM sites WHERE status = 'online' ORDER BY demeter_id ASC")
+        cur.execute(
+            """
+            SELECT demeter_id, uuid, url, status, active, downloads, scrapes
+            FROM sites
+            WHERE LOWER(TRIM(status)) IN ('online','active') OR active=1
+            ORDER BY demeter_id ASC
+            """
+        )
         rows = cur.fetchall()
         if not rows:
             print("No hosts were found.")
         else:
             for row in rows:
-                print(f"demeter_id: {row[0]}, UUID: {row[1]}, URL: {row[2]}, Status: {row[3]}, Downloads: {row[4]}, Scrapes: {row[5]}")
+                print(f"demeter_id: {row[0]}, UUID: {row[1]}, URL: {row[2]}, Status: {row[3]}, Active: {row[4]}, Downloads: {row[5]}, Scrapes: {row[6]}")
     except Exception as e:
         print(f"Error listing hosts: {e}")
+    finally:
+        conn.close()
+
+def handle_host_list_all(args):
+    conn = get_sites_db_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT demeter_id, uuid, url, status, active, downloads, scrapes
+            FROM sites
+            ORDER BY demeter_id ASC
+            """
+        )
+        rows = cur.fetchall()
+        if not rows:
+            print("No hosts were found in sites table.")
+            return
+        for row in rows:
+            print(f"demeter_id: {row[0]}, UUID: {row[1]}, URL: {row[2]}, Status: {row[3]}, Active: {row[4]}, Downloads: {row[5]}, Scrapes: {row[6]}")
+    except Exception as e:
+        print(f"Error listing all hosts: {e}")
     finally:
         conn.close()
 
@@ -211,10 +252,63 @@ def handle_host_rm(args):
         conn.commit()
         conn.close()
 
+
 def handle_host_enable(args):
     conn = get_sites_db_conn()
     cur = conn.cursor()
     try:
+        # Enable all hosts by country code if provided (case-insensitive)
+        country_code = getattr(args, 'enable_country', None)
+        if country_code:
+            cc = country_code.strip().lower()
+            cur.execute(
+                """
+                SELECT demeter_id, uuid, url, country, active
+                FROM sites
+                WHERE LOWER(TRIM(country)) = ? AND (active IS NULL OR active=0)
+                ORDER BY demeter_id ASC
+                """,
+                (cc,)
+            )
+            rows = cur.fetchall()
+            if not rows:
+                print(f"No hosts found with country='{country_code}' needing enable.")
+                return
+            ids = [r[0] for r in rows]
+            placeholders = ",".join(["?"] * len(ids))
+            cur.execute(f"UPDATE sites SET active=1 WHERE demeter_id IN ({placeholders})", ids)
+            print(f"Enabled {len(ids)} host(s) for country '{country_code}' (active=1).")
+            for r in rows:
+                print(f"  demeter_id {r[0]} (uuid={r[1]}, url={r[2]}, country={r[3]}) -> active=1")
+            return
+
+        # Enable all Online hosts if flag set
+        if getattr(args, 'enable_all', False):
+            cur.execute(
+                """
+                SELECT demeter_id, uuid, url, status, active
+                FROM sites
+                WHERE LOWER(TRIM(status))='online' AND (active IS NULL OR active=0)
+                ORDER BY demeter_id ASC
+                """
+            )
+            rows = cur.fetchall()
+            if not rows:
+                print("No hosts with status 'Online' to enable.")
+                return
+            ids = [r[0] for r in rows]
+            placeholders = ",".join(["?"] * len(ids))
+            cur.execute(f"UPDATE sites SET status='active', active=1 WHERE demeter_id IN ({placeholders})", ids)
+            print(f"Enabled {len(ids)} host(s) with status 'Online'.")
+            for r in rows:
+                print(f"  demeter_id {r[0]} (uuid={r[1]}, url={r[2]}) -> active=1")
+            return
+
+        # Otherwise, enable a single host by demeter_id
+        if not getattr(args, 'hostid', None):
+            print("Please provide a hostid or use --enable-all/--enable-country.")
+            return
+
         # Check if demeter_id exists and get current status
         cur.execute("SELECT uuid, url, status, active FROM sites WHERE demeter_id=?", (args.hostid,))
         row = cur.fetchone()
@@ -222,12 +316,12 @@ def handle_host_enable(args):
             print(f"No host found with demeter_id {args.hostid}.")
             return
         uuid, url, current_status, current_active = row
-        
+
         # Check if already enabled
         if current_active == 1:
             print(f"Host with demeter_id {args.hostid} (uuid={uuid}, url={url}) is already enabled (status='{current_status}', active={current_active})")
             return
-            
+
         # Enable the host
         cur.execute("UPDATE sites SET status='active', active=1 WHERE demeter_id=?", (args.hostid,))
         print(f"Host with demeter_id {args.hostid} (uuid={uuid}, url={url}) has been enabled (status='active', active=1)")
@@ -241,6 +335,33 @@ def handle_host_disable(args):
     conn = get_sites_db_conn()
     cur = conn.cursor()
     try:
+        # Disable all currently active hosts if flag set
+        if getattr(args, 'disable_all', False):
+            cur.execute(
+                """
+                SELECT demeter_id, uuid, url, status, active
+                FROM sites
+                WHERE active=1
+                ORDER BY demeter_id ASC
+                """
+            )
+            rows = cur.fetchall()
+            if not rows:
+                print("No active hosts to disable.")
+                return
+            ids = [r[0] for r in rows]
+            placeholders = ",".join(["?"] * len(ids))
+            # Only set active=0; do not change status in bulk disable
+            cur.execute(f"UPDATE sites SET active=0 WHERE demeter_id IN ({placeholders})", ids)
+            print(f"Disabled {len(ids)} host(s) that were active (set active=0 only).")
+            for r in rows:
+                print(f"  demeter_id {r[0]} (uuid={r[1]}, url={r[2]}) -> active=0")
+            return
+
+        # Otherwise, disable a single host by demeter_id
+        if not getattr(args, 'hostid', None):
+            print("Please provide a hostid or use --disable-all.")
+            return
         # Check if demeter_id exists
         cur.execute("SELECT uuid, url FROM sites WHERE demeter_id=?", (args.hostid,))
         row = cur.fetchone()
@@ -259,16 +380,20 @@ def handle_host_stats(args):
     conn = get_sites_db_conn()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT demeter_id, uuid, url, downloads, scrapes, last_scrape, last_download FROM sites WHERE demeter_id=?", (args.hostid,))
+        cur.execute("SELECT demeter_id, uuid, url, status, downloads, scrapes, last_scrape, last_download, book_count, libraries_count FROM sites WHERE demeter_id=?", (args.hostid,))
         row = cur.fetchone()
         if row:
             print(f"Host Stats for {row[2]}:")
             print(f"  demeter_id: {row[0]}")
             print(f"  UUID: {row[1]}")
-            print(f"  Downloads: {row[3]}")
-            print(f"  Scrapes: {row[4]}")
-            print(f"  Last Scrape: {row[5]}")
-            print(f"  Last Download: {row[6]}")
+            print(f"  Status: {row[3]}")
+            print(f"  Downloads: {row[4]}")
+            print(f"  Scrapes: {row[5]}")
+            print(f"  Last Scrape: {row[6]}")
+            print(f"  Last Download: {row[7]}")
+            print(f"  Book Count: {row[8]}")
+            print(f"  Libraries Count: {row[9]}")
+            print(f"  ")
         else:
             print("No host found with that demeter_id.")
     except Exception as e:
@@ -287,6 +412,8 @@ def handle_scrape_run(args):
     user_agent = 'demeter / v1'
     output_dir = getattr(args, 'outputdir', 'books')
     extension = getattr(args, 'extension', 'epub')
+    authors_pattern = getattr(args, 'authors', None)
+    titles_pattern = getattr(args, 'titles', None)
     timeout = 30
 
     os.makedirs(output_dir, exist_ok=True)
@@ -310,13 +437,25 @@ def handle_scrape_run(args):
         conn = get_index_db_conn()
         try:
             cur = conn.cursor()
-            # Only prefilter by host here; do extension filtering in Python for robustness
-            cur.execute("SELECT uuid, links FROM summary WHERE links LIKE ?", (f"%{host}%",))
+            # Prefilter by host; optional authors LIKE filter; do extension filtering in Python for robustness
+            sql = "SELECT uuid, links FROM summary WHERE links LIKE ?"
+            params = [f"%{host}%"]
+            if authors_pattern:
+                sql += " AND authors LIKE ?"
+                params.append(authors_pattern)
+            if titles_pattern:
+                sql += " AND title LIKE ?"
+                params.append(titles_pattern)
+            cur.execute(sql, tuple(params))
             rows = cur.fetchall()
         finally:
             conn.close()
         print(f"[DEBUG] Host: {host_url}")
         print(f"[DEBUG] Querying index.db for links LIKE '%{host}%' ...")
+        if authors_pattern:
+            print(f"[DEBUG] Applying authors LIKE filter: {authors_pattern}")
+        if titles_pattern:
+            print(f"[DEBUG] Applying title LIKE filter: {titles_pattern}")
         print(f"[DEBUG] Found book UUIDs and links: {rows}")
         import json
         book_links = []
