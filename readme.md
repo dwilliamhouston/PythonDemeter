@@ -1,6 +1,6 @@
-# demeter
+# PythonDemeter
 
-demeter is a tool for downloading the .epub files you don't have from a Calibre library. It does this by building a database of books it has seen based on some clever algorithms. At least, that's the idea.
+PythonDemeter is a tool for downloading the .epub files you don't have from a Calibre library. It does this by building a database of books it has seen based on some clever algorithms. At least, that's the idea.
 
 (Demeter only allows scraping a host every 12 hours to prevent overloading the server.)
 
