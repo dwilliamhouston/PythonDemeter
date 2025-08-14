@@ -6,11 +6,7 @@ demeter is a tool for downloading the .epub files you don't have from a Calibre 
 
 # Installation and Usage
 
-Download the appropriate demeter binary for your platform from the [releases](https://github.com/gnur/demeter/releases) page.
-
-This is a standalone binary, there's no need to install any dependencies.
-
-Move it somewhere in your \$PATH so you can call it with `demeter`
+You will need Python3 on your desktop computer and you need to put the demeter app in the root directory of the data directory where the OpenCalibre data files are installed.
 
 ## Add a Host
 
