@@ -106,6 +106,7 @@ Usage:
 Flags:
   -h, --help               help for run
   -d, --outputdir string   path to downloaded books to (default "books")
+  -e,                      format of book(s) you want to download.  Options are (AZW, PDF, EPUB).
   -n, --stepsize int       number of books to request per query (default 50)
   -u, --useragent string   user agent used to identify to calibre hosts (default "demeter / v1")
   -w, --workers int        number of workers to concurrently download books (default 10)
