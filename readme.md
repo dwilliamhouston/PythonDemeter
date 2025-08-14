@@ -76,10 +76,10 @@ Usage:
 
 Available Commands:
   disable                  Disable a host
-  <b>disable --disable-all    Disable all enabled hosts</b>
+  disable --disable-all    Disable all enabled hosts **
   enabled                  Make a host active
-  enable --enable-all      Enable all hosts
-  enable --enable-country  Enable all hosts from a particular country using country code  
+  enable --enable-all      Enable all hosts **
+  enable --enable-country  Enable all hosts from a particular country using country code ** 
   list                     List all hosts
   rm                       Delete a host
   stats                    Get host stats
@@ -108,6 +108,8 @@ Flags:
   -n, --stepsize int       number of books to request per query (default 50)
   -u, --useragent string   user agent used to identify to calibre hosts (default "demeter / v1")
   -w, --workers int        number of workers to concurrently download books (default 10)
-  -a,                      search by authors. Must have search criteria in quotes.  example: -a "%Brad Thor%" will download all books by Brad Thor as author.
-  -t,                      search by title of book.  Must have search criteria in quotes.  example: -t "%Python%" will download ll books with Python in the title of the book.
+  -a,                      search by authors. Must have search criteria in quotes.  example: -a "%Brad Thor%" will download all books by Brad Thor as author. **
+  -t,                      search by title of book.  Must have search criteria in quotes.  example: -t "%Python%" will download ll books with Python in the title of the book. **
+
+** - Features that are unique to the Python release that arent in the original Go version of Demeter.
 ```
