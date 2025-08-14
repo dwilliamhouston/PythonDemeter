@@ -22,7 +22,8 @@ The -e flag on the `scrape run` command only affects that specific run, the book
 
 # Database
 
-Demeter uses the OpenCalibre database that is available weekly to those that subscribe to the CSV level of 
+Demeter uses the OpenCalibre database that is available weekly to those that subscribe to the CSV level of
+
 <a href="https://www.buymeacoffee.com/opencalibre" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
 # Scraping
