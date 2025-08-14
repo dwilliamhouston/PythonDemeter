@@ -8,10 +8,6 @@ PythonDemeter is a tool for downloading the .epub files you don't have from a Ca
 
 You will need Python3 on your desktop computer and you need to put the demeter app in the root directory of the data directory where the OpenCalibre data files are installed.
 
-## Add a Host
-
-`demeter host add http://example.com:8080`
-
 ## Scrape all hosts and store results in the directory ./books and only download the extension pdf
 
 `demeter scrape run -d books -e pdf`
